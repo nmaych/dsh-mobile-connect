@@ -1,4 +1,5 @@
 # Scratch
+.audit/
 .tmp/
 .pylibs/
 .pylibs-decoders/

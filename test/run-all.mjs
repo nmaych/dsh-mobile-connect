@@ -16,6 +16,8 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const suites = [
   ['pairing', 'pairing.test.mjs', '配对逻辑：配对码、设备令牌、限流、持久化'],
   ['gateway', 'gateway.test.mjs', '网关：代理、Host 改写、Cookie 注入、WebSocket 隧道'],
+  ['api', 'api.test.mjs', '桌面界面接口：状态、二维码、生成新码、移除设备、信任栅栏'],
+  ['client', 'client.test.mjs', '桌面界面客户端 bundle：注册契约、渲染、文案'],
   ['qr-unit', 'qr-unit.test.mjs', '二维码 API 契约与渲染器单元测试'],
   ['qr-matrix', 'qr-verify.mjs', '二维码矩阵：与参考实现逐模块比对'],
   ['qr-terminal', 'qr-terminal-real.mjs', '二维码终端渲染：交给真实解码器扫描'],
