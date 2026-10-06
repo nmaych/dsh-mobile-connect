@@ -83,7 +83,13 @@ const fakeHarness = http.createServer((req, res) => {
       res.end('unauthorized')
       return
     }
-    lastUpstreamRequest = { host, cookie: req.headers.cookie ?? '', url: req.url }
+    lastUpstreamRequest = {
+      host,
+      cookie: req.headers.cookie ?? '',
+      url: req.url,
+      // Recorded so a test can prove the hop does not forward `Expect`.
+      expect: req.headers.expect ?? null,
+    }
     res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'upstream=secret' })
     res.end(JSON.stringify({ ok: true, sawHost: host, path: url.pathname }))
     return
@@ -232,6 +238,66 @@ check('the upstream cookie is not leaked back to the phone', async () => {
   const setCookie = res.headers.getSetCookie?.() ?? []
   assert.equal(setCookie.length, 0, `the phone must not receive cookies, got ${JSON.stringify(setCookie)}`)
   await res.arrayBuffer()
+})
+
+check('an Expect: 100-continue request is proxied, not answered with 502', async () => {
+  // Regression: `expect` used to be forwarded verbatim to the upstream hop.
+  // Node's own HTTP client (`fetch`/undici) refuses that header outright with
+  // UND_ERR_NOT_SUPPORTED, so the gateway answered 502 "无法连接到本机 DSH 服务"
+  // for every client that sends it — .NET's HttpClient and `curl` both do.
+  // The interim 100 is the *gateway's* to send, so the header must not travel.
+  const observed = await new Promise((resolve, reject) => {
+    const sock = net.connect({ host: '127.0.0.1', port: gatewayPort })
+    let buffer = ''
+    const timer = setTimeout(() => {
+      sock.destroy()
+      resolve(buffer)
+    }, 5000)
+    sock.on('connect', () => {
+      const body = JSON.stringify({ hello: 'expect' })
+      sock.write(
+        `POST /api/session/list?t=${globalThis.__token} HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${gatewayPort}\r\n` +
+          `content-type: application/json\r\n` +
+          `content-length: ${Buffer.byteLength(body)}\r\n` +
+          `expect: 100-continue\r\n\r\n`,
+      )
+      // Wait for the interim 100 before sending the body, exactly as a
+      // conforming client does.
+      setTimeout(() => sock.write(body), 200)
+    })
+    sock.on('data', (chunk) => {
+      buffer += chunk.toString('latin1')
+      if (buffer.includes('"ok":true') || /^HTTP\/1\.\d 5\d\d/.test(buffer)) {
+        clearTimeout(timer)
+        sock.destroy()
+        resolve(buffer)
+      }
+    })
+    sock.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
+
+  const status = Number(/^HTTP\/1\.\d (\d{3})/.exec(observed)?.[1])
+  // The interim 100 comes first; the final status is the last one in the stream.
+  const allStatuses = [...observed.matchAll(/HTTP\/1\.\d (\d{3})/g)].map((m) => Number(m[1]))
+  const final = allStatuses.at(-1)
+  assert.ok(
+    allStatuses.includes(100),
+    `the gateway should answer the interim 100 itself, saw ${JSON.stringify(allStatuses)} (first=${status})`,
+  )
+  assert.equal(
+    final,
+    200,
+    `expected a proxied 200, got ${final}; stream was ${JSON.stringify(observed.slice(0, 300))}`,
+  )
+  assert.equal(
+    lastUpstreamRequest?.expect ?? null,
+    null,
+    'the Expect header must not be forwarded upstream',
+  )
 })
 
 check('a WebSocket upgrade is tunnelled through', async () => {

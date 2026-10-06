@@ -158,6 +158,8 @@ Harness 在 `/api` 前面有两道独立的门：
 
 **手机永远不会收到 Harness 的会话 Cookie。** 网关会剥掉上行响应里的 `Set-Cookie`，也不把 Cookie 转发给手机。这有一个专门的测试守着。
 
+**`Expect: 100-continue` 由网关自己应答，不转发给上游。** 这个头的意思是「我先不传正文，你确认了再传」，而 Node 的 HTTP 服务端在没有注册 `checkContinue` 监听器时会自动回一个 `100 Continue`。也就是说，请求进到转发逻辑时客户端早就被告知可以传正文了。把该头继续转发出去会要求上游再决策一次，而 Node 自己的 `fetch`（undici）直接拒绝这个头（`UND_ERR_NOT_SUPPORTED`），结果是每个这样的请求都变成 502「无法连接到本机 DSH 服务」——看起来像是电脑掉线了。.NET 的 `HttpClient` 和 `curl` 默认都会发这个头，所以这条路径很容易被踩到。
+
 **这个插件扩大了你的暴露面，请知情：** 打开它意味着同一个网络里的设备可以访问这个端口。它们过不了认证，但能看到「这里有个 DSH」。在家里的 Wi-Fi 上这没什么；在咖啡厅的公共 Wi-Fi 上，建议 `enabled: false`。
 
 **用 HTTPS 也救不了明文**：Harness 本身跑在 loopback HTTP 上，Cookie 不带 `Secure`。跨网络使用时请用 Tailscale / WireGuard 这类隧道，而不是把端口直接暴露到公网。
@@ -186,7 +188,7 @@ node test/run-all.mjs
 | 套件 | 内容 |
 |---|---|
 | `pairing` | 配对码、设备令牌、限流锁定、持久化（15 项） |
-| `gateway` | 代理、Host 改写、Cookie 注入与剥离、WebSocket 隧道、超大请求体释放连接、请求目标不可被重定向（15 项） |
+| `gateway` | 代理、Host 改写、Cookie 注入与剥离、WebSocket 隧道、超大请求体释放连接、请求目标不可被重定向、`Expect: 100-continue` 不被转发（16 项） |
 | `api` | 桌面界面接口：状态、二维码、生成新码、移除设备、信任栅栏 |
 | `client` | 桌面界面客户端 bundle：注册契约、渲染、文案 |
 | `qr-unit` | 二维码 API 契约与渲染器，含静区钳制（34 项） |
