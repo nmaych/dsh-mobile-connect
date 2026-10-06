@@ -1,0 +1,15 @@
+# dsh-mobile-connect bundle patch: inserts the LAN gateway into a profile's layer stack.
+#
+# The row injects `webServer` and `connection` from the plugin's own `inject`
+# declaration, so no `inject` key is needed here. `config` below is optional —
+# every key has a default; uncomment to override.
+- insert:
+    - id: dsh-mobile-connect
+      name: 'dsh-mobile-connect'
+      # config:
+      #   port: 19387            # 手机连接用的端口
+      #   host: '0.0.0.0'        # 监听所有网卡
+      #   name: 'DSH Harness'    # 手机上显示的名字
+      #   codeTtlMinutes: 10     # 配对码有效期
+      #   discovery: true        # 局域网自动发现
+      #   enabled: true

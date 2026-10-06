@@ -1,0 +1,13 @@
+# Test profile: boots the real `dsh web` composition plus the plugin under test.
+#
+# The plugin is installed as a local `link:` dependency so edits take effect
+# without a publish step, exactly as a user installing from a folder would get.
+
+- insert:
+    - id: dsh-mobile-connect
+      name: 'dsh-mobile-connect'
+      config:
+        port: 19399
+        name: 'Test Harness'
+        codeTtlMinutes: 10
+        discovery: false

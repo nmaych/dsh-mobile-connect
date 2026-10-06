@@ -1,0 +1,39 @@
+{
+  "name": "dsh-mobile-connect",
+  "version": "1.0.0",
+  "description": "让手机在同一个 Wi-Fi 下直接连上桌面版 DeepSeek Harness —— 扫码配对，无需端口转发。 · Connect DSH Mobile to this desktop Harness over the LAN with QR pairing and no port forwarding.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "mobile",
+    "lan",
+    "pairing",
+    "mdns"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

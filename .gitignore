@@ -1,0 +1,10 @@
+# Scratch
+.tmp/
+.pylibs/
+.pylibs-decoders/
+.qr-verify-*/
+node_modules/
+
+# Test scratch
+test/dshhome/
+test/*.log
