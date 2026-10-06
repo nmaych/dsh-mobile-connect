@@ -19,6 +19,7 @@ import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { PairingService } from '../lib/pairing.js'
@@ -302,6 +303,120 @@ check('revoking the device closes the door', async () => {
     init: { method: 'POST' },
   })
   assert.equal(res.status, 401, 'a revoked token must stop working')
+})
+
+check('an oversized pairing body is refused and the socket is released', async () => {
+  // Regression: readJsonBody used to `return` from inside its `for await` loop,
+  // which destroys the readable and leaves the socket open forever. The client
+  // here keeps writing past the limit, which is what exposes the leak — a
+  // client that has already flushed the whole body does not.
+  const limit = 4096
+  const total = 200_000
+  const observed = await new Promise((resolve) => {
+    const sock = net.connect({ host: '127.0.0.1', port: gatewayPort })
+    const state = { status: undefined, released: false }
+    sock.on('connect', () => {
+      sock.write(
+        `POST /.dsh-mobile-connect/pair HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${gatewayPort}\r\n` +
+          `content-type: application/json\r\n` +
+          `content-length: ${total}\r\n\r\n`,
+      )
+      let sent = 0
+      const trickle = setInterval(() => {
+        if (sent >= total) return clearInterval(trickle)
+        sock.write('a'.repeat(limit))
+        sent += limit
+      }, 10)
+      setTimeout(() => {
+        clearInterval(trickle)
+        sock.destroy()
+        resolve(state)
+      }, 1500)
+    })
+    sock.on('data', (chunk) => {
+      const match = chunk.toString('latin1').match(/^HTTP\/1\.\d (\d{3})/)
+      if (match !== null && state.status === undefined) state.status = Number(match[1])
+    })
+    sock.on('end', () => {
+      state.released = true
+    })
+    sock.on('close', () => {
+      state.released = true
+    })
+    sock.on('error', () => {
+      state.released = true
+    })
+  })
+
+  assert.equal(
+    observed.status,
+    413,
+    `an oversized body must be refused from its declared length, got ${observed.status}`,
+  )
+  assert.equal(observed.released, true, 'the server must release the connection')
+})
+
+check('a protocol-relative or absolute request target cannot redirect the hop', async () => {
+  // Regression: #targetUrl used to concatenate the raw request line onto the
+  // loopback origin, so `//host/x` and `/\host/x` reached the upstream verbatim
+  // and were re-interpreted there. The target must stay on the configured origin.
+  const seen = []
+  const probeUpstream = http.createServer((req, res) => {
+    seen.push(req.url)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end('{"ok":true}')
+  })
+  const probePort = await new Promise((resolve) =>
+    probeUpstream.listen(0, '127.0.0.1', () => resolve(probeUpstream.address().port)),
+  )
+  const { LanGateway: Gateway } = await import('../lib/gateway.js')
+  const probeGateway = new Gateway({
+    pairing,
+    localPort: probePort,
+    localHost: '127.0.0.1',
+    config: { name: 'Target probe', pluginVersion: '1.0.0' },
+    log: silent,
+  })
+  const probeGatewayPort = await probeGateway.listen()
+  const probeCode = pairing.issueCode()
+  const paired = await fetch(`http://127.0.0.1:${probeGatewayPort}/.dsh-mobile-connect/pair`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: probeCode, name: 'target-probe' }),
+  })
+  const probeToken = (await paired.json()).token
+
+  try {
+    for (const raw of ['//evil.example/x', '/\\evil.example/x']) {
+      seen.length = 0
+      await new Promise((resolve) => {
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port: probeGatewayPort,
+            method: 'GET',
+            path: `${raw}?t=${probeToken}`,
+          },
+          (res) => {
+            res.resume()
+            res.on('end', resolve)
+          },
+        )
+        req.on('error', resolve)
+        req.end()
+      })
+      const forwarded = seen[0] ?? ''
+      assert.ok(
+        !forwarded.startsWith('//') && !forwarded.includes('evil.example'),
+        `${JSON.stringify(raw)} reached the upstream as ${JSON.stringify(forwarded)}`,
+      )
+    }
+  } finally {
+    await probeGateway.close()
+    probeUpstream.closeAllConnections?.()
+    await new Promise((resolve) => probeUpstream.close(resolve))
+  }
 })
 
 check('a burst of wrong codes locks the code out', async () => {

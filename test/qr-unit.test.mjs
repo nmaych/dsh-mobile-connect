@@ -324,11 +324,30 @@ check('toTerminal lines are all the same width', () => {
   return assert(widths.size === 1, `ragged output, widths: ${[...widths].join(', ')}`);
 });
 
-check('toTerminal default quiet zone is 2', () => {
+check('toTerminal default quiet zone is 4 (the ISO/IEC 18004 minimum)', () => {
   const m = encode('HELLO WORLD');
   const withDefault = toTerminal(m);
-  const explicit = toTerminal(m, { quietZone: 2 });
-  return assert(withDefault === explicit, 'default quiet zone is not 2');
+  const explicit = toTerminal(m, { quietZone: 4 });
+  return assert(withDefault === explicit, 'default quiet zone is not 4');
+});
+
+check('toTerminal clamps a negative quiet zone instead of cropping', () => {
+  const m = encode('HELLO WORLD');
+  const negative = toTerminal(m, { quietZone: -5 });
+  const zero = toTerminal(m, { quietZone: 0 });
+  if (!assert(negative === zero, 'a negative quiet zone must clamp to 0, not crop the symbol')) {
+    return false;
+  }
+  // Every row must still be wide enough to hold the full symbol.
+  const width = negative.split('\n')[0].length;
+  return assert(width >= m.length, `cropped: width ${width} < matrix ${m.length}`);
+});
+
+check('toTerminal tolerates a fractional quiet zone', () => {
+  const m = encode('HELLO WORLD');
+  const fractional = toTerminal(m, { quietZone: 2.7 });
+  const floored = toTerminal(m, { quietZone: 2 });
+  return assert(fractional === floored, 'a fractional quiet zone must floor, not corrupt the matrix');
 });
 
 // ---------------------------------------------------------------------------
