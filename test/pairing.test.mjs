@@ -172,6 +172,243 @@ check('timing-safe compare does not throw on odd input', () => {
   assert.equal(p.redeem(null, 'x').ok, false)
 })
 
+// -------------------------------------------------- pairing the same phone twice
+
+/**
+ * A store no other check has touched.
+ *
+ * The checks above share one `dir`, which is fine for what they assert, but
+ * every check below counts devices — and a shared store would carry their
+ * devices in, making the count depend on how many checks ran first.
+ */
+function fresh() {
+  return new PairingService({
+    storeDir: fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-connect-dup-')),
+    ttlMinutes: 10,
+    log: silent,
+  })
+}
+
+check('pairing the same device twice leaves one device, not two', () => {
+  // The reported bug: connect twice from one phone and the panel showed two
+  // identical paired devices. The second record held a token the phone had
+  // already overwritten, so it was a row that could never be used or cleaned up.
+  const p = fresh()
+  const first = p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  const second = p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  assert.equal(first.ok, true)
+  assert.equal(second.ok, true)
+  assert.equal(p.deviceCount, 1, 'a re-pair must replace, not append')
+  assert.equal(p.listDevices().length, 1)
+})
+
+check('a re-pair invalidates the token the phone just abandoned', () => {
+  const p = fresh()
+  const first = p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  const second = p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  assert.equal(p.verifyDeviceToken(first.token), undefined, 'the superseded token must be refused')
+  assert.ok(p.verifyDeviceToken(second.token), 'the current token must work')
+})
+
+check('a re-pair keeps the original pairedAt but refreshes lastSeenAt', () => {
+  // The panel removes a device by its index in a list ordered by `pairedAt`.
+  // Letting a re-pair bump that timestamp would reorder rows under a user who is
+  // about to remove a different one, so the original moment is kept.
+  const p = fresh()
+  const first = p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  const second = p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  assert.equal(second.device.pairedAt, first.device.pairedAt)
+  assert.ok(second.device.lastSeenAt >= first.device.lastSeenAt)
+})
+
+check('a re-pair can rename the device', () => {
+  const p = fresh()
+  p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  p.redeem(p.issueCode(), '我的 Pixel', 'install-abc')
+  assert.equal(p.listDevices()[0].name, '我的 Pixel')
+})
+
+check('two phones of the same model each keep their own row', () => {
+  // Identity, not the name, is what decides a replacement. Two identical labels
+  // must stay two devices as long as they identified themselves separately.
+  const p = fresh()
+  p.redeem(p.issueCode(), 'Pixel 8', 'install-a')
+  p.redeem(p.issueCode(), 'Pixel 8', 'install-b')
+  assert.equal(p.deviceCount, 2, 'same name is not the same device')
+})
+
+check('an unidentified client still appends, as before', () => {
+  // Backwards compatibility: an app build from before this field existed sends
+  // no identity, and the desktop must keep working with it rather than merging
+  // rows it cannot tell apart.
+  const p = fresh()
+  const first = p.redeem(p.issueCode(), 'Pixel 8')
+  const second = p.redeem(p.issueCode(), 'Pixel 8')
+  assert.equal(p.deviceCount, 2)
+  assert.ok(p.verifyDeviceToken(first.token), 'the earlier anonymous device stays valid')
+  assert.ok(p.verifyDeviceToken(second.token))
+})
+
+check('an identified phone merges the anonymous leftovers of its own name', () => {
+  // The upgrade path: the user already has duplicate rows on disk from the old
+  // append-only behaviour. They carry no identity, so the first identified
+  // pairing from that phone is the only chance to reconcile them.
+  const p = fresh()
+  p.redeem(p.issueCode(), 'Pixel 8')
+  p.redeem(p.issueCode(), 'Pixel 8')
+  assert.equal(p.deviceCount, 2, 'precondition: the old behaviour left two rows')
+
+  const adopted = p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  assert.equal(p.deviceCount, 1, 'the leftovers must be merged into the identified device')
+  assert.ok(p.verifyDeviceToken(adopted.token))
+})
+
+check('a different phone\'s identified row is never merged by name', () => {
+  // The bound on the name-based cleanup: it only ever touches records that
+  // identified nothing. An identified row belongs to someone.
+  const p = fresh()
+  const other = p.redeem(p.issueCode(), 'Pixel 8', 'install-other')
+  p.redeem(p.issueCode(), 'Pixel 8', 'install-mine')
+  assert.equal(p.deviceCount, 2, 'an identified row must not be swept up by a name match')
+  assert.ok(p.verifyDeviceToken(other.token), 'the other phone must still authenticate')
+})
+
+check('the identity is not exposed to the desktop GUI', () => {
+  const p = fresh()
+  p.redeem(p.issueCode(), 'Pixel 8', 'install-abc')
+  const serialized = JSON.stringify(p.listDevices())
+  assert.ok(!serialized.includes('install-abc'), 'the device list must not carry the identity')
+})
+
+check('a re-pair survives a restart without duplicating', () => {
+  const dir7 = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-connect-repair-'))
+  const first = new PairingService({ storeDir: dir7, ttlMinutes: 10, log: silent })
+  first.redeem(first.issueCode(), 'Pixel 8', 'install-abc')
+
+  const second = new PairingService({ storeDir: dir7, ttlMinutes: 10, log: silent })
+  const { token } = second.redeem(second.issueCode(), 'Pixel 8', 'install-abc')
+  assert.equal(second.deviceCount, 1, 'the identity must survive persistence')
+  assert.ok(second.verifyDeviceToken(token))
+})
+
+check('an absurd or non-string identity is treated as none', () => {
+  // A hostile or buggy client must not be able to make two devices collide by
+  // sending a giant identity, and a non-string must not throw.
+  const p = fresh()
+  for (const bogus of [undefined, null, 42, {}, 'x'.repeat(500), '   ']) {
+    assert.equal(p.redeem(p.issueCode(), 'Pixel 8', bogus).ok, true)
+  }
+  assert.equal(p.deviceCount, 6, 'each unidentified pairing appends')
+})
+
+// ------------------------------------------------- the upgrade path, on disk
+
+/** Write a store file by hand, the way a pre-identity release left it. */
+function storeWith(devices) {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-connect-legacy-'))
+  fs.writeFileSync(
+    path.join(storeDir, 'devices.json'),
+    JSON.stringify({ version: 1, devices }, null, 2),
+    'utf8',
+  )
+  return storeDir
+}
+
+check('starting up merges the duplicate rows already on disk', () => {
+  // The user's actual situation: the duplicates exist *before* the update, and
+  // the list must be clean the first time the plugin starts afterwards — not
+  // only after each phone happens to pair again. Records from before the field
+  // existed carry no identity, so startup is where they can be reconciled.
+  const storeDir = storeWith([
+    { hash: 'a'.repeat(64), name: 'Pixel 8', pairedAt: 1000, lastSeenAt: 1000 },
+    { hash: 'b'.repeat(64), name: 'Pixel 8', pairedAt: 2000, lastSeenAt: 2000 },
+  ])
+  const p = new PairingService({ storeDir, ttlMinutes: 10, log: silent })
+  assert.equal(p.deviceCount, 1, 'the duplicate rows must be merged at startup')
+  assert.equal(p.listDevices()[0].name, 'Pixel 8')
+})
+
+check('startup merging keeps the record from the latest pairing', () => {
+  // Keeping the newest matters: the phone overwrites its stored token on every
+  // pairing, so the *latest* pairing is the one whose token still works. Keeping
+  // the wrong one would log the user out for nothing.
+  const storeDir = storeWith([
+    { hash: 'old'.padEnd(64, '0'), name: 'Pixel 8', pairedAt: 1000, lastSeenAt: 1000 },
+    { hash: 'new'.padEnd(64, '0'), name: 'Pixel 8', pairedAt: 2000, lastSeenAt: 2000 },
+  ])
+  const p = new PairingService({ storeDir, ttlMinutes: 10, log: silent })
+  const devices = p.listDevices()
+  assert.equal(devices.length, 1)
+  assert.equal(devices[0].pairedAt, 2000, 'the latest pairing must survive')
+})
+
+check('startup merging trusts pairedAt over a stale lastSeenAt', () => {
+  // `lastSeenAt` cannot decide this on its own: the abandoned record was the one
+  // still being *used* right up until the re-pair, so it often looks newer. The
+  // pairing order is what identifies the live token.
+  const storeDir = storeWith([
+    { hash: 'old'.padEnd(64, '0'), name: 'Pixel 8', pairedAt: 1000, lastSeenAt: 9000 },
+    { hash: 'new'.padEnd(64, '0'), name: 'Pixel 8', pairedAt: 2000, lastSeenAt: 2000 },
+  ])
+  const p = new PairingService({ storeDir, ttlMinutes: 10, log: silent })
+  assert.equal(
+    p.listDevices()[0].pairedAt,
+    2000,
+    'the later pairing is the live one even though the older row was seen more recently',
+  )
+})
+
+check('startup merging leaves different names alone', () => {
+  const storeDir = storeWith([
+    { hash: 'a'.repeat(64), name: 'Pixel 8', pairedAt: 1000, lastSeenAt: 1000 },
+    { hash: 'b'.repeat(64), name: '我的 iPhone', pairedAt: 2000, lastSeenAt: 2000 },
+  ])
+  const p = new PairingService({ storeDir, ttlMinutes: 10, log: silent })
+  assert.equal(p.deviceCount, 2, 'unrelated devices must not be merged')
+})
+
+check('startup merging never touches a record that identified itself', () => {
+  // The bound that keeps this from deleting a working device: an identified
+  // record is a known phone, not a leftover. Two phones of the same model that
+  // both paired after the update must both survive a restart.
+  const storeDir = storeWith([
+    { hash: 'a'.repeat(64), name: 'Pixel 8', pairedAt: 1000, lastSeenAt: 1000, deviceId: 'install-a' },
+    { hash: 'b'.repeat(64), name: 'Pixel 8', pairedAt: 2000, lastSeenAt: 2000, deviceId: 'install-b' },
+  ])
+  const p = new PairingService({ storeDir, ttlMinutes: 10, log: silent })
+  assert.equal(p.deviceCount, 2, 'identified devices must survive startup untouched')
+})
+
+check('startup merging is idempotent and persists its result', () => {
+  const storeDir = storeWith([
+    { hash: 'a'.repeat(64), name: 'Pixel 8', pairedAt: 1000, lastSeenAt: 1000 },
+    { hash: 'b'.repeat(64), name: 'Pixel 8', pairedAt: 2000, lastSeenAt: 2000 },
+  ])
+  const first = new PairingService({ storeDir, ttlMinutes: 10, log: silent })
+  assert.equal(first.deviceCount, 1)
+
+  // A second start must find the merged store, not the original duplicates.
+  const second = new PairingService({ storeDir, ttlMinutes: 10, log: silent })
+  assert.equal(second.deviceCount, 1, 'the merge must have been written to disk')
+  const onDisk = JSON.parse(fs.readFileSync(path.join(storeDir, 'devices.json'), 'utf8'))
+  assert.equal(onDisk.devices.length, 1)
+})
+
+check('a store with no duplicates is left exactly as it was', () => {
+  // The merge must not rewrite (and so must not risk) a store that is already
+  // correct — including one holding a single anonymous device.
+  const storeDir = storeWith([
+    { hash: 'a'.repeat(64), name: 'Pixel 8', pairedAt: 1000, lastSeenAt: 1000 },
+  ])
+  const before = fs.readFileSync(path.join(storeDir, 'devices.json'), 'utf8')
+  new PairingService({ storeDir, ttlMinutes: 10, log: silent })
+  assert.equal(
+    fs.readFileSync(path.join(storeDir, 'devices.json'), 'utf8'),
+    before,
+    'an untouched store must not be rewritten',
+  )
+})
+
 await Promise.all(pending)
 
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} passed`)

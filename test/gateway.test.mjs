@@ -214,6 +214,52 @@ check('the token unlocks the Harness through the gateway', async () => {
   assert.equal(body.ok, true)
 })
 
+check('pairing the same phone twice over HTTP adds only one device', async () => {
+  // The reported symptom, end to end: connect twice from one phone and the
+  // desktop's list showed the same device twice. The second pairing left behind
+  // a record whose token the phone had already replaced.
+  //
+  // A dedicated instance, like the lockout case below: this check pairs devices,
+  // and the shared fixture's device count is asserted later on.
+  const dupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-connect-dup-'))
+  const dupPairing = new PairingService({ storeDir: dupDir, ttlMinutes: 10, log: silent })
+  const dupGateway = new LanGateway({
+    pairing: dupPairing,
+    localPort: harnessPort,
+    localHost: '127.0.0.1',
+    config: { name: 'Duplicate Test', pluginVersion: '1.0.0' },
+    log: silent,
+  })
+  const dupPort = await dupGateway.listen()
+  const dupBase = `http://127.0.0.1:${dupPort}`
+
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const res = await fetch(`${dupBase}/.dsh-mobile-connect/pair`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          code: dupPairing.currentCode(),
+          name: 'Pixel 8',
+          deviceId: 'install-abc',
+        }),
+      })
+      assert.equal(res.status, 200, `pairing ${i + 1} should succeed`)
+      await res.arrayBuffer()
+    }
+
+    const info = await (await fetch(`${dupBase}/.dsh-mobile-connect/info`)).json()
+    assert.equal(info.deviceCount, 1, 'two pairings from one phone must leave one device')
+    assert.equal(
+      dupPairing.listDevices().filter((d) => d.name === 'Pixel 8').length,
+      1,
+      'the device list must not contain the same phone twice',
+    )
+  } finally {
+    await dupGateway.close()
+  }
+})
+
 check('the gateway rewrote Host to loopback', async () => {
   assert.ok(lastUpstreamRequest, 'the upstream should have been called')
   assert.match(

@@ -165,8 +165,22 @@ check('GET /status lists devices without leaking their token hashes', async () =
   })
 })
 
-check('GET /status tolerates a machine with no LAN address', async () => {
+check('the panel shows one row after the same phone pairs twice', async () => {
+  // The reported bug, at the surface the user actually looks at: pairing twice
+  // from one phone made 「已配对设备」 list the same device twice.
   const pairing = makePairing()
+  pairing.redeem(pairing.peekCode(), 'Pixel 8', 'install-abc')
+  pairing.redeem(pairing.peekCode(), 'Pixel 8', 'install-abc')
+  await withServer(makeHandler(pairing, makeRuntime()), async (base) => {
+    const body = await (await fetch(`${base}${API_PREFIX}/status`)).json()
+    assert.equal(body.devices.length, 1, `expected one row, got ${JSON.stringify(body.devices)}`)
+    assert.equal(body.devices[0].name, 'Pixel 8')
+    // The indices the panel posts back to /forget must address that one row.
+    assert.equal(body.devices[0].index, 0)
+  })
+})
+
+check('GET /status tolerates a machine with no LAN address', async () => {  const pairing = makePairing()
   const runtime = makeRuntime({ addresses: () => [], primaryAddress: () => null })
   await withServer(makeHandler(pairing, runtime), async (base) => {
     const body = await (await fetch(`${base}${API_PREFIX}/status`)).json()
